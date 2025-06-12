@@ -132,3 +132,7 @@ python3 client.py TORTA.jpg 13.220.235.189:50051
 - O processamento foi validado end-to-end com múltiplas execuções.
 - O uso da IAM Role `LabInstanceProfile` permitiu o acesso seguro ao S3.
 # AWS-CloudFormation
+
+## Vídeo do projeto
+
+- https://drive.google.com/file/d/1C49_h56Ke5iFpKQD4xN4_KBCgzYykHvS/view?usp=sharing
