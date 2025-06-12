@@ -1,0 +1,17 @@
+syntax = "proto3";
+
+package cloudimg;
+
+message ImageRequest {
+  string filename = 1;
+  bytes image_data = 2;
+}
+
+message ImageResponse {
+  bool success = 1;
+  string message = 2;
+}
+
+service ImageService {
+  rpc SendImage(ImageRequest) returns (ImageResponse);
+}

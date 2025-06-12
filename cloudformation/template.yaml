@@ -1,0 +1,186 @@
+AWSTemplateFormatVersion: '2010-09-09'
+Description: Stack AWS CloudFormation - Infraestrutura para sistema distribuido de processamento de imagens (Produtor, Workers, RabbitMQ, S3).
+Resources:
+
+  CloudImgVPC:
+    Type: AWS::EC2::VPC
+    Properties:
+      CidrBlock: 10.0.0.0/16
+      EnableDnsHostnames: true
+      EnableDnsSupport: true
+      Tags:
+        - Key: Name
+          Value: CloudImgVPC
+
+  InternetGateway:
+    Type: AWS::EC2::InternetGateway
+    Properties:
+      Tags:
+        - Key: Name
+          Value: CloudImg-IGW
+
+  AttachGateway:
+    Type: AWS::EC2::VPCGatewayAttachment
+    Properties:
+      InternetGatewayId: !Ref InternetGateway
+      VpcId: !Ref CloudImgVPC
+
+  PublicSubnet:
+    Type: AWS::EC2::Subnet
+    Properties:
+      VpcId: !Ref CloudImgVPC
+      CidrBlock: 10.0.1.0/24
+      MapPublicIpOnLaunch: true
+      AvailabilityZone: !Select
+        - 0
+        - !GetAZs ''
+      Tags:
+        - Key: Name
+          Value: CloudImgSubnetPublic
+
+  RouteTable:
+    Type: AWS::EC2::RouteTable
+    Properties:
+      VpcId: !Ref CloudImgVPC
+      Tags:
+        - Key: Name
+          Value: CloudImgPublicRouteTable
+
+  PublicRoute:
+    Type: AWS::EC2::Route
+    DependsOn: AttachGateway
+    Properties:
+      RouteTableId: !Ref RouteTable
+      DestinationCidrBlock: 0.0.0.0/0
+      GatewayId: !Ref InternetGateway
+
+  SubnetRouteAssoc:
+    Type: AWS::EC2::SubnetRouteTableAssociation
+    Properties:
+      SubnetId: !Ref PublicSubnet
+      RouteTableId: !Ref RouteTable
+
+  ProducerSG:
+    Type: AWS::EC2::SecurityGroup
+    Properties:
+      GroupDescription: "Acesso ao Produtor e comunicacao com RabbitMQ"
+      VpcId: !Ref CloudImgVPC
+      SecurityGroupIngress:
+        - IpProtocol: tcp
+          FromPort: 50051
+          ToPort: 50051
+          CidrIp: 0.0.0.0/0
+        - IpProtocol: tcp
+          FromPort: 5672
+          ToPort: 5672
+          SourceSecurityGroupId: !Ref WorkerSG
+        - IpProtocol: tcp
+          FromPort: 22
+          ToPort: 22
+          CidrIp: 0.0.0.0/0
+      SecurityGroupEgress:
+        - IpProtocol: '-1'
+          FromPort: 0
+          ToPort: 0
+          CidrIp: 0.0.0.0/0
+      Tags:
+        - Key: Name
+          Value: CloudImg-Prod-SG
+
+  WorkerSG:
+    Type: AWS::EC2::SecurityGroup
+    Properties:
+      GroupDescription: "Acesso do Worker e comunicacao com Produtor"
+      VpcId: !Ref CloudImgVPC
+      SecurityGroupIngress:
+        - IpProtocol: tcp
+          FromPort: 22
+          ToPort: 22
+          CidrIp: 0.0.0.0/0
+      SecurityGroupEgress:
+        - IpProtocol: '-1'
+          FromPort: 0
+          ToPort: 0
+          CidrIp: 0.0.0.0/0
+      Tags:
+        - Key: Name
+          Value: CloudImg-Worker-SG
+
+  ImageBucket:
+    Type: AWS::S3::Bucket
+    Properties:
+      BucketName: !Join
+        - '-'
+        - - cloudimg
+          - !Ref AWS::AccountId
+          - !Ref AWS::Region
+          - bucket
+          - !Select
+            - 0
+            - !Split
+              - '-'
+              - !Select
+                - 2
+                - !Split
+                  - / 
+                  - !Ref AWS::StackId
+      AccessControl: Private
+
+  ProducerInstance:
+    Type: AWS::EC2::Instance
+    Properties:
+      ImageId: ami-09e6f87a47903347c
+      InstanceType: t2.micro
+      KeyName: prova-final
+      NetworkInterfaces:
+        - AssociatePublicIpAddress: true
+          DeviceIndex: '0'
+          SubnetId: !Ref PublicSubnet
+          GroupSet:
+            - !Ref ProducerSG
+      Tags:
+        - Key: Name
+          Value: CloudImg-Producer
+      UserData: !Base64 |
+        #!/bin/bash
+        yum update -y
+        amazon-linux-extras install docker -y
+        service docker start
+        usermod -a -G docker ec2-user
+        docker run -d --restart unless-stopped --name rabbitmq -p 5672:5672 rabbitmq:3
+        yum install -y python3 python3-pip
+        pip3 install --upgrade pip
+        pip3 install grpcio pika
+
+  WorkerInstance:
+    Type: AWS::EC2::Instance
+    Properties:
+      ImageId: ami-09e6f87a47903347c
+      InstanceType: t2.micro
+      KeyName: prova-final
+      NetworkInterfaces:
+        - AssociatePublicIpAddress: true
+          DeviceIndex: '0'
+          SubnetId: !Ref PublicSubnet
+          GroupSet:
+            - !Ref WorkerSG
+      Tags:
+        - Key: Name
+          Value: CloudImg-Worker
+      UserData: !Base64 |
+        #!/bin/bash
+        yum update -y
+        yum install -y python3 python3-pip
+        pip3 install --upgrade pip
+        pip3 install pillow boto3 pika grpcio
+        echo "export RABBIT_HOST=${ProducerInstance.PrivateIp}" >> /etc/profile
+        echo "export BUCKET_NAME=${ImageBucket}" >> /etc/profile
+
+Outputs:
+  ProducerPublicIP:
+    Description: IP público da instância Produtor (use para conectar o cliente gRPC)
+    Value: '!GetAtt ProducerInstance.PublicIp'
+
+  S3BucketName:
+    Description: Nome do bucket S3 para armazenar imagens processadas
+    Value: '!Ref ImageBucket'
