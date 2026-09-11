@@ -1,137 +1,67 @@
+# Processamento distribuído de imagens na AWS
 
-# Sistema Distribuído de Processamento de Imagens em Nuvem
-
-Este projeto implementa um sistema distribuído para processamento de imagens utilizando uma arquitetura baseada em nuvem, comunicação assíncrona e protocolos modernos.
+Projeto acadêmico que demonstra uma arquitetura produtor-worker-cliente para processamento assíncrono de imagens.
 
 ## Arquitetura
 
-- AWS CloudFormation para provisionamento da infraestrutura.
-- EC2 para executar produtor, worker e client.
-- S3 para armazenamento de imagens processadas.
-- RabbitMQ como middleware de mensageria.
-- gRPC para comunicação entre o client e o producer.
+1. O cliente envia uma imagem ao produtor por gRPC.
+2. O produtor publica a solicitação no RabbitMQ.
+3. O worker converte a imagem para escala de cinza com Pillow.
+4. O resultado é armazenado em um bucket S3 privado.
+5. A infraestrutura é descrita em AWS CloudFormation.
 
-## Estrutura do Repositório
+## Tecnologias
 
-```
-.
-├── cloudformation/
-│   ├── template.yaml              # Template CloudFormation para provisionamento da infraestrutura
-├── app/
-│   ├── client.py                   # Cliente gRPC para envio de imagens
-│   ├── producer_server.py         # Servidor gRPC que publica imagens na fila RabbitMQ
-│   ├── worker.py                  # Worker que consome fila e processa imagens
-│   ├── image.proto                # Definição gRPC
-│   ├── image_pb2.py, image_pb2_grpc.py # Código gerado pelo protoc
-└── README.md                  # Este documento
-```
-
-## Código de Infraestrutura
-
-- `template.yaml`: define a VPC, subnets, instâncias EC2, security groups, RabbitMQ container, e bucket S3 com versionamento habilitado.
-
-## Código da Aplicação Distribuída
-
-- Producer (`producer_server.py`): recebe imagens via gRPC e publica na fila `images` do RabbitMQ.
-- Worker (`worker.py`): consome imagens da fila, converte para escala de cinza e envia para o bucket S3.
-- Client (`client.py`): envia imagens para o producer via gRPC.
-
-## Scripts de Build/Deploy
-
-- Não foi utilizado Docker neste projeto.
-- O provisionamento e configuração são feitos via AWS CloudFormation e instalação manual dos componentes na EC2 via `UserData` no template.
-
-## Instruções para Execução Local e em Nuvem
-
-### Provisionamento da Infraestrutura (CloudFormation)
-
-1. Faça o deploy do template:
-
-```bash
-aws cloudformation create-stack   --stack-name cloudimg-stack   --template-body file://template.yaml   --capabilities CAPABILITY_IAM
-```
-
-2. Aguarde a criação e verifique os outputs:
-
-```bash
-aws cloudformation describe-stacks --stack-name cloudimg-stack --query "Stacks[0].Outputs"
-```
-
-3. Pegue o IP público da instância Producer para usar no client.
-
-### Configuração e Deploy dos Serviços
-
-#### Producer (EC2 Producer Instance)
-
-O `producer_server.py` já é iniciado manualmente:
-
-```bash
-python3 producer_server.py
-```
-
-#### Worker (EC2 Worker Instance)
-
-Antes de iniciar o `worker.py`, defina as variáveis de ambiente necessárias:
-
-```bash
-export RABBIT_HOST=IP_DO_PRODUTOR
-export BUCKET_NAME=NOME_DO_BUCKET_S3
-```
-
-Exemplo:
-
-```bash
-export RABBIT_HOST=13.220.235.189
-export BUCKET_NAME=cloudimg-339713171421-us-east-1-bucket-93b24680
-```
-
-Em seguida, execute o worker:
-
-```bash
-python3 worker.py
-```
-
-Observação: As EC2 workers devem estar associadas a uma IAM Role com permissão S3.
-
-### Testes e Execução
-
-#### Envio de Imagem (Client)
-
-No seu terminal local ou na EC2 Producer:
-
-```bash
-python3 client.py CAMINHO-DA-IMAGEM.jpg IP_PRODUCER:50051
-```
-
-Exemplo:
-
-```bash
-python3 client.py TORTA.jpg 13.220.235.189:50051
-```
-
-- O Producer publicará a imagem na fila RabbitMQ.
-- O Worker processará e enviará a imagem cinza para o bucket S3.
-
-### Validação
-
-- Acompanhe os logs do `worker.py` para verificar o processamento.
-- Verifique no AWS S3 Console se a imagem processada foi enviada corretamente.
-
-## Tecnologias Utilizadas
-
-- AWS EC2, S3, CloudFormation
+- Python 3, gRPC e Protobuf
 - RabbitMQ
-- Python 3.11
-- gRPC + Protobuf
-- boto3
-- Pillow (PIL)
+- AWS EC2 e S3
+- AWS CloudFormation
+- boto3 e Pillow
 
-## Considerações
+## Estrutura
 
-- Toda a arquitetura segue os requisitos da atividade prática.
-- O processamento foi validado end-to-end com múltiplas execuções.
-- O uso da IAM Role `LabInstanceProfile` permitiu o acesso seguro ao S3.
+- `cloudformation/template.yaml`: VPC, rede, instâncias, grupos de segurança e bucket S3.
+- `app/producer_server.py`: recebe imagens e publica mensagens.
+- `app/worker.py`: consome mensagens, processa imagens e grava no S3.
+- `app/client.py`: envia imagens ao serviço gRPC.
+- `app/image.proto`: contrato gRPC.
 
-# Vídeo do projeto
+## Configuração segura
 
-- https://drive.google.com/file/d/1C49_h56Ke5iFpKQD4xN4_KBCgzYykHvS/view?usp=sharing
+O repositório não contém endpoints, nomes de bucket nem credenciais reais. Informe os valores do seu próprio ambiente.
+
+No deploy do CloudFormation, restrinja os parâmetros `AllowedClientCidr` e `AllowedSshCidr` aos CIDRs que realmente precisam de acesso. Os valores padrão não abrem os serviços para a internet.
+
+Exemplo de criação da stack:
+
+```bash
+aws cloudformation create-stack \
+  --stack-name cloudimg-stack \
+  --template-body file://cloudformation/template.yaml \
+  --parameters \
+    ParameterKey=AllowedClientCidr,ParameterValue=SEU_IP_PUBLICO/32 \
+    ParameterKey=AllowedSshCidr,ParameterValue=SEU_IP_PUBLICO/32 \
+  --capabilities CAPABILITY_IAM
+```
+
+Depois do provisionamento, recupere os outputs da stack e configure o ambiente:
+
+```bash
+export PRODUCER_GRPC_ADDRESS=HOST_DO_PRODUTOR:50051
+export RABBIT_HOST=HOST_PRIVADO_DO_RABBITMQ
+export BUCKET_NAME=NOME_DO_BUCKET
+python3 app/client.py caminho/para/imagem.jpg
+```
+
+As instâncias worker devem usar uma IAM Role com a permissão mínima necessária para gravar no bucket.
+
+## Validação realizada
+
+O fluxo foi validado ponta a ponta em ambiente acadêmico: envio por gRPC, processamento assíncrono, consumo pelo worker e persistência do resultado no S3. O repositório ainda não inclui uma suíte automatizada de testes, métricas de carga ou garantias de produção.
+
+## Segurança e custos
+
+- Use credenciais temporárias e IAM Roles; não grave chaves no código.
+- Revise regras de rede antes de cada deploy.
+- Remova a stack e os recursos ao terminar o teste para evitar cobranças.
+- Se qualquer valor publicado anteriormente ainda estiver ativo, faça a rotação ou substituição no provedor correspondente.
