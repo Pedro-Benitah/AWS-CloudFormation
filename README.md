@@ -1,67 +1,95 @@
 # Processamento distribuído de imagens na AWS
 
-Projeto acadêmico que demonstra uma arquitetura produtor-worker-cliente para processamento assíncrono de imagens.
+Projeto acadêmico que separa o recebimento de imagens do processamento assíncrono. O cliente envia a imagem por **gRPC**, o produtor a publica no **RabbitMQ** e o worker converte o conteúdo para escala de cinza antes de gravá-lo no **S3**.
+
+**Python · gRPC/Protobuf · RabbitMQ · Pillow · boto3 · EC2 · S3 · CloudFormation**
 
 ## Arquitetura
 
-1. O cliente envia uma imagem ao produtor por gRPC.
-2. O produtor publica a solicitação no RabbitMQ.
-3. O worker converte a imagem para escala de cinza com Pillow.
-4. O resultado é armazenado em um bucket S3 privado.
-5. A infraestrutura é descrita em AWS CloudFormation.
+```mermaid
+flowchart TD
+    C[Cliente Python] -->|Imagem por gRPC| P[Produtor]
+    P -->|Publica imagem| Q[Fila RabbitMQ: images]
+    Q -->|Consome mensagem| W[Worker com Pillow]
+    W -->|Grava imagem em escala de cinza| S[Bucket S3]
+    W -->|Confirma após a gravação| Q
+```
 
-## Tecnologias
-
-- Python 3, gRPC e Protobuf
-- RabbitMQ
-- AWS EC2 e S3
-- AWS CloudFormation
-- boto3 e Pillow
+A resposta de sucesso do produtor confirma o **enfileiramento**, não a conclusão do processamento. A conclusão precisa ser verificada no bucket e nos logs do worker. Não há endpoint de consulta de status.
 
 ## Estrutura
 
-- `cloudformation/template.yaml`: VPC, rede, instâncias, grupos de segurança e bucket S3.
-- `app/producer_server.py`: recebe imagens e publica mensagens.
-- `app/worker.py`: consome mensagens, processa imagens e grava no S3.
-- `app/client.py`: envia imagens ao serviço gRPC.
-- `app/image.proto`: contrato gRPC.
+| Arquivo | Responsabilidade |
+| --- | --- |
+| [`app/client.py`](app/client.py) | Lê uma imagem e chama o serviço gRPC. |
+| [`app/producer_server.py`](app/producer_server.py) | Publica o conteúdo e o nome do arquivo na fila `images`. |
+| [`app/worker.py`](app/worker.py) | Converte a imagem e grava no S3; confirma a mensagem após a gravação. |
+| [`app/image.proto`](app/image.proto) | Contrato da API gRPC. |
+| [`cloudformation/template.yaml`](cloudformation/template.yaml) | Descrição de rede, instâncias, grupos de segurança e bucket. |
 
-## Configuração segura
+## Preparar uma execução de desenvolvimento
 
-O repositório não contém endpoints, nomes de bucket nem credenciais reais. Informe os valores do seu próprio ambiente.
-
-No deploy do CloudFormation, restrinja os parâmetros `AllowedClientCidr` e `AllowedSshCidr` aos CIDRs que realmente precisam de acesso. Os valores padrão não abrem os serviços para a internet.
-
-Exemplo de criação da stack:
+Requisitos: Python compatível com as dependências, RabbitMQ na máquina do produtor e acesso a um bucket S3 de teste. Use credenciais temporárias do ambiente AWS ou IAM Role, sem gravá-las nos arquivos.
 
 ```bash
-aws cloudformation create-stack \
-  --stack-name cloudimg-stack \
-  --template-body file://cloudformation/template.yaml \
-  --parameters \
-    ParameterKey=AllowedClientCidr,ParameterValue=SEU_IP_PUBLICO/32 \
-    ParameterKey=AllowedSshCidr,ParameterValue=SEU_IP_PUBLICO/32 \
-  --capabilities CAPABILITY_IAM
+python -m venv .venv
+# Linux/macOS
+source .venv/bin/activate
+# Windows PowerShell: .\.venv\Scripts\Activate.ps1
+python -m pip install "grpcio>=1.71.0" "protobuf>=5.29.0,<6" pika boto3 Pillow
 ```
 
-Depois do provisionamento, recupere os outputs da stack e configure o ambiente:
+As versões mínimas acima refletem os arquivos gRPC/Protobuf gerados. O repositório ainda não possui um arquivo de dependências fixado e esta revisão não instalou nem executou o sistema distribuído.
+
+Com o RabbitMQ disponível, inicie o produtor em um terminal:
 
 ```bash
-export PRODUCER_GRPC_ADDRESS=HOST_DO_PRODUTOR:50051
-export RABBIT_HOST=HOST_PRIVADO_DO_RABBITMQ
-export BUCKET_NAME=NOME_DO_BUCKET
-python3 app/client.py caminho/para/imagem.jpg
+python app/producer_server.py
 ```
 
-As instâncias worker devem usar uma IAM Role com a permissão mínima necessária para gravar no bucket.
+O produtor conecta ao RabbitMQ em `localhost` e usa o comportamento padrão de autenticação da biblioteca Pika. O código atual não oferece variáveis para usuário e senha do broker. Prepare a autenticação explicitamente antes de qualquer execução entre máquinas; não exponha o broker à internet.
 
-## Validação realizada
+Em outro terminal, configure o worker com os valores do seu ambiente de teste:
 
-O fluxo foi validado ponta a ponta em ambiente acadêmico: envio por gRPC, processamento assíncrono, consumo pelo worker e persistência do resultado no S3. O repositório ainda não inclui uma suíte automatizada de testes, métricas de carga ou garantias de produção.
+```bash
+export RABBIT_HOST=127.0.0.1
+export BUCKET_NAME=NOME_DO_SEU_BUCKET_DE_TESTE
+python app/worker.py
+```
+
+No Windows PowerShell, use `$env:RABBIT_HOST='127.0.0.1'` e `$env:BUCKET_NAME='NOME_DO_SEU_BUCKET_DE_TESTE'`. O worker precisa de autorização para `s3:PutObject` no destino; a configuração depende do ambiente.
+
+Por fim, envie uma imagem existente:
+
+```bash
+python app/client.py caminho/para/imagem.jpg 127.0.0.1:50051
+```
+
+O endereço do produtor também pode ser definido por `PRODUCER_GRPC_ADDRESS`. O caminho da imagem pode ser definido por `IMAGE_PATH` ou pelo primeiro argumento. O worker grava um nome como `imagem_gray.jpg`; imagens com o mesmo nome podem sobrescrever o mesmo objeto.
+
+## CloudFormation: pontos pendentes antes de provisionar
+
+O template registra a infraestrutura do exercício, mas ainda precisa de ajustes para uma implantação reproduzível:
+
+- `ImageId` e `KeyName` são fixos; verifique disponibilidade na região e na conta escolhidas.
+- Os outputs `ProducerPublicIP` e `S3BucketName` estão escritos como strings com `!GetAtt` e `!Ref` entre aspas. Corrija-os para funções intrínsecas antes de utilizá-los.
+- O template não associa uma IAM Role ao worker. Configure o perfil da instância com permissão mínima para o bucket.
+- O `UserData` instala parte das dependências, mas não copia nem inicia os scripts da aplicação; a configuração entre instâncias e a autenticação do broker também precisam ser concluídas.
+- Restrinja `AllowedClientCidr` e `AllowedSshCidr` aos endereços necessários. Os padrões são `127.0.0.1/32` e não autorizam acesso remoto de clientes.
+
+Revise esses pontos antes de criar recursos. Não há um deploy automatizado validado nesta revisão.
+
+## Validação e limites
+
+O fluxo foi demonstrado em ambiente acadêmico, conforme a documentação do projeto. Nesta revisão, a conferência foi feita por leitura do código e do template, sem novo provisionamento AWS.
+
+- A fila é declarada com `durable=False` e as mensagens não são marcadas como persistentes.
+- Não há TLS no gRPC, consulta de progresso, política explícita de retry ou fila de mensagens rejeitadas.
+- Não há suíte automatizada, medição de carga ou garantia de disponibilidade.
+- O compartilhamento da conexão Pika entre chamadas concorrentes do produtor precisa de revisão antes de aumentar a carga.
 
 ## Segurança e custos
 
-- Use credenciais temporárias e IAM Roles; não grave chaves no código.
-- Revise regras de rede antes de cada deploy.
-- Remova a stack e os recursos ao terminar o teste para evitar cobranças.
-- Se qualquer valor publicado anteriormente ainda estiver ativo, faça a rotação ou substituição no provedor correspondente.
+Use apenas imagens de teste e recursos sob seu controle. Não publique credenciais, endpoints privados ou dados de clientes. Se alguma credencial de versões anteriores ainda estiver ativa, revogue-a no provedor: remover um valor do código não comprova revogação.
+
+Instâncias EC2, armazenamento S3 e tráfego podem gerar cobranças. Ao encerrar, esvazie o bucket de teste e remova os recursos criados, conferindo se a exclusão da stack foi concluída.
